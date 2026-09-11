@@ -13,6 +13,8 @@ extern "C" {
 #include <freertos/task.h>
 #include <bsp/m5stack_tab5.h>
 #include <lv_demos.h>
+#include <cstdlib>
+#include <ctime>
 
 extern esp_lcd_touch_handle_t _lcd_touch_handle;
 
@@ -81,6 +83,8 @@ void HalEsp32::init()
     mclog::tagInfo(_tag, "bus voltage: {}", ina226.readBusVoltage());
 
     mclog::tagInfo(_tag, "rx8130 init");
+    setenv("TZ", "CST-8", 1);
+    tzset();
     rx8130.begin(i2c_bus_handle, 0x32);
     rx8130.initBat();
     clearRtcIrq();
@@ -250,7 +254,12 @@ void HalEsp32::setRtcTime(tm time)
 {
     mclog::tagInfo(_tag, "set rtc time to {}/{}/{} {:02d}:{:02d}:{:02d}", time.tm_year + 1900, time.tm_mon + 1,
                    time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
-    rx8130.setTime(&time);
+
+    time.tm_isdst = -1;
+    time_t local_ts = mktime(&time);
+    struct tm* utc_tm = gmtime(&local_ts);
+
+    rx8130.setTime(utc_tm);
     delay(50);
 
     update_system_time();
@@ -261,10 +270,18 @@ void HalEsp32::update_system_time()
     mclog::tagInfo(_tag, "update system time");
     struct tm time;
     rx8130.getTime(&time);
-    mclog::tagInfo(_tag, "sync to rtc time: {}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}", time.tm_year + 1900,
-                   time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+    mclog::tagInfo(_tag, "rtc utc time: {}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}", time.tm_year + 1900, time.tm_mon + 1,
+                   time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+
+    setenv("TZ", "UTC", 1);
+    tzset();
+    time.tm_isdst = 0;
+    time_t ts     = mktime(&time);
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
     struct timeval now;
-    now.tv_sec  = mktime(&time);
+    now.tv_sec  = ts;
     now.tv_usec = 0;
     settimeofday(&now, NULL);
 }
