@@ -42,3 +42,11 @@ CONFIG_LV_FONT_FMT_TXT_LARGE=y
 CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_USE_DEMO_BENCHMARK=y
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+# HTTP(80) + TCP(8888, 多客户端) + UDP(8889) 并发余量
+CONFIG_LWIP_MAX_SOCKETS=16
+# 注意：请勿抬高 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE！
+# 它同时就是 configMINIMAL_STACK_SIZE，抬高后会加大 vTaskStartScheduler 阶段两个空闲任务的栈，
+# 挤占启动期内部 DRAM，使紧随其后创建的 FreeRTOS 定时器任务栈被分配到 TCM(0x3010_xxxx) 堆上；
+# 而 xPortcheckValidStackMem() 判定 TCM 非法（TCM 不在 SOC_BYTE_ACCESSIBLE_LOW/HIGH 区间内），
+# 于是开机即 "assert failed: xTaskCreateStaticPinnedToCore (xPortcheckValidStackMem(...))" 重启。
+# 保持 IDF 默认值 1536。

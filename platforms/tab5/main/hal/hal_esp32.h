@@ -76,6 +76,20 @@ public:
     bool getExtAntennaEnable() override;
     void startWifiAp() override;
 
+    // WiFi Station（第二屏）
+    void wifiSetMode(WifiMode_t mode) override;
+    bool wifiHasSavedCredential() override;
+    void wifiConnectSaved() override;
+    void wifiScanStart() override;
+    bool wifiIsScanning() override;
+    std::vector<WifiApInfo_t> wifiGetScanResults() override;
+    void wifiConnect(const std::string& ssid, const std::string& pass) override;
+    void wifiDisconnect() override;
+    WifiStaInfo_t wifiGetStaInfo() override;
+    WifiMode_t wifiGetMode() override;
+    void wifiSendData(const std::string& data, bool useUdp) override;
+    void wifiClearRxLog() override;
+
     bool isSdCardMounted() override;
     std::vector<FileEntry_t> scanSdCard(const std::string& dirPath) override;
 

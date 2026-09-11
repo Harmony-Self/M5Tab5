@@ -4,199 +4,96 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal/hal_esp32.h"
-#include <mooncake_log.h>
-#include <vector>
-#include <memory>
-#include <string.h>
+#include "hal/components/wifi_service.h"
 #include <bsp/m5stack_tab5.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/event_groups.h>
-#include <esp_wifi.h>
-#include <nvs_flash.h>
-#include <esp_event.h>
-#include <esp_log.h>
-#include <nvs_flash.h>
-#include <esp_netif.h>
-#include <esp_wifi_default.h>
-#include <esp_wifi_netif.h>
-#include <esp_private/wifi.h>
-#include <esp_http_server.h>
+#include <mooncake_log.h>
+#include <string>
+#include <vector>
 
 #define TAG "wifi"
 
-#define WIFI_SSID    "M5Tab5-UserDemo-WiFi"
-#define WIFI_PASS    ""
-#define MAX_STA_CONN 4
-
-static bool s_wifi_ap_netif_started = false;
-
-static void wifi_remote_ap_start_handler(void* arg, esp_event_base_t base, int32_t event_id, void* data)
-{
-    auto* netif = static_cast<esp_netif_t*>(arg);
-    if (s_wifi_ap_netif_started || esp_netif_is_netif_up(netif)) {
-        ESP_LOGW(TAG, "ignore duplicate Wi-Fi AP start event");
-        return;
-    }
-
-    auto driver = static_cast<wifi_netif_driver_t>(esp_netif_get_io_driver(netif));
-    uint8_t mac[6];
-    esp_err_t ret = esp_wifi_get_if_mac(driver, mac);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_get_if_mac failed: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    if (esp_wifi_is_if_ready_when_started(driver)) {
-        ret = esp_wifi_register_if_rxcb(driver, esp_netif_receive, netif);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "esp_wifi_register_if_rxcb failed: %s", esp_err_to_name(ret));
-            return;
-        }
-    }
-
-    ret = esp_wifi_internal_reg_netstack_buf_cb(esp_netif_netstack_buf_ref, esp_netif_netstack_buf_free);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "netstack cb register failed: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    esp_netif_set_mac(netif, mac);
-    esp_netif_action_start(netif, base, event_id, data);
-    s_wifi_ap_netif_started = true;
-}
-
-static void wifi_remote_ap_stop_handler(void* arg, esp_event_base_t base, int32_t event_id, void* data)
-{
-    auto* netif = static_cast<esp_netif_t*>(arg);
-    if (!s_wifi_ap_netif_started && !esp_netif_is_netif_up(netif)) {
-        ESP_LOGW(TAG, "ignore duplicate Wi-Fi AP stop event");
-        return;
-    }
-
-    esp_netif_action_stop(netif, base, event_id, data);
-    s_wifi_ap_netif_started = false;
-}
-
-static esp_netif_t* create_wifi_remote_ap_netif()
-{
-    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_WIFI_AP();
-    esp_netif_t* netif     = esp_netif_new(&cfg);
-    assert(netif);
-
-    ESP_ERROR_CHECK(esp_netif_attach_wifi_ap(netif));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_START, wifi_remote_ap_start_handler, netif));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STOP, wifi_remote_ap_stop_handler, netif));
-
-    return netif;
-}
-
-// HTTP 处理函数
-esp_err_t hello_get_handler(httpd_req_t* req)
-{
-    const char* html_response = R"rawliteral(
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Hello</title>
-            <style>
-                body {
-                    display: flex;
-                    flex-direction: column;
-                    justify-content: center;
-                    align-items: center;
-                    height: 100vh;
-                    margin: 0;
-                    font-family: sans-serif;
-                    background-color: #f0f0f0;
-                }
-                h1 {
-                    font-size: 48px;
-                    color: #333;
-                    margin: 0;
-                }
-                p {
-                    font-size: 18px;
-                    color: #666;
-                    margin-top: 10px;
-                }
-            </style>
-        </head>
-        <body>
-            <h1>Hello World</h1>
-            <p>From M5Tab5</p>
-        </body>
-        </html>
-    )rawliteral";
-
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, html_response, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-}
-
-// URI 路由
-httpd_uri_t hello_uri = {.uri = "/", .method = HTTP_GET, .handler = hello_get_handler, .user_ctx = nullptr};
-
-// 启动 Web Server
-httpd_handle_t start_webserver()
-{
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    httpd_handle_t server = nullptr;
-
-    if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_register_uri_handler(server, &hello_uri);
-    }
-    return server;
-}
-
-// 初始化 Wi-Fi AP 模式
-void wifi_init_softap()
-{
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    create_wifi_remote_ap_netif();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    wifi_config_t wifi_config = {};
-    std::strncpy(reinterpret_cast<char*>(wifi_config.ap.ssid), WIFI_SSID, sizeof(wifi_config.ap.ssid));
-    std::strncpy(reinterpret_cast<char*>(wifi_config.ap.password), WIFI_PASS, sizeof(wifi_config.ap.password));
-    wifi_config.ap.ssid_len       = std::strlen(WIFI_SSID);
-    wifi_config.ap.max_connection = MAX_STA_CONN;
-    wifi_config.ap.authmode       = WIFI_AUTH_OPEN;
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "Wi-Fi AP started. SSID:%s password:%s", WIFI_SSID, WIFI_PASS);
-}
-
-static void wifi_ap_test_task(void* param)
-{
-    wifi_init_softap();
-    start_webserver();
-
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    vTaskDelete(NULL);
-}
+/**
+ * @brief WiFi 的 HAL 层薄封装
+ *
+ * 具体的模式切换 / 扫描 / 连接 / 服务端管理都在 WifiService 中实现，
+ * 这里只做接口转发，所有接口均不阻塞调用方（LVGL 任务可安全调用）。
+ */
 
 bool HalEsp32::wifi_init()
 {
-    mclog::tagInfo(TAG, "wifi init");
+    mclog::tagInfo(TAG, "wifi service start");
 
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+    // 启动内部任务（非阻塞），随后请求进入 AP 模式（第一屏的热点 + 网页）
+    WifiService::instance().start();
+    WifiService::instance().setMode(hal::HalBase::WIFI_MODE_AP);
 
-    xTaskCreate(wifi_ap_test_task, "ap", 4096, nullptr, 5, nullptr);
     return true;
+}
+
+void HalEsp32::startWifiAp()
+{
+    // 幂等：第一屏启动动画与需要热点的场景都可以重复调用
+    wifi_init();
+}
+
+void HalEsp32::wifiSetMode(WifiMode_t mode)
+{
+    WifiService::instance().setMode(mode);
+}
+
+bool HalEsp32::wifiHasSavedCredential()
+{
+    return WifiService::instance().hasSavedCredential();
+}
+
+void HalEsp32::wifiConnectSaved()
+{
+    WifiService::instance().connectSaved();
+}
+
+void HalEsp32::wifiScanStart()
+{
+    WifiService::instance().scanStart();
+}
+
+bool HalEsp32::wifiIsScanning()
+{
+    return WifiService::instance().isScanning();
+}
+
+std::vector<hal::HalBase::WifiApInfo_t> HalEsp32::wifiGetScanResults()
+{
+    return WifiService::instance().scanResults();
+}
+
+void HalEsp32::wifiConnect(const std::string& ssid, const std::string& pass)
+{
+    WifiService::instance().connect(ssid, pass);
+}
+
+void HalEsp32::wifiDisconnect()
+{
+    WifiService::instance().disconnect();
+}
+
+hal::HalBase::WifiStaInfo_t HalEsp32::wifiGetStaInfo()
+{
+    return WifiService::instance().staInfo();
+}
+
+hal::HalBase::WifiMode_t HalEsp32::wifiGetMode()
+{
+    return WifiService::instance().mode();
+}
+
+void HalEsp32::wifiSendData(const std::string& data, bool useUdp)
+{
+    WifiService::instance().sendData(data, useUdp);
+}
+
+void HalEsp32::wifiClearRxLog()
+{
+    WifiService::instance().clearLog();
 }
 
 void HalEsp32::setExtAntennaEnable(bool enable)
@@ -209,9 +106,4 @@ void HalEsp32::setExtAntennaEnable(bool enable)
 bool HalEsp32::getExtAntennaEnable()
 {
     return _ext_antenna_enable;
-}
-
-void HalEsp32::startWifiAp()
-{
-    wifi_init();
 }

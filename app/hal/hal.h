@@ -263,6 +263,93 @@ public:
     {
     }
 
+    /* -------------------------------- WiFi STA -------------------------------- */
+    // 工作模式：AP（第一屏热点 + 网页）与 STA（第二屏连接外部路由器）互斥，不共存
+    enum WifiMode_t {
+        WIFI_MODE_OFF = 0,
+        WIFI_MODE_AP,
+        WIFI_MODE_STA,
+    };
+
+    enum WifiStaState_t {
+        WIFI_STA_IDLE = 0,
+        WIFI_STA_SCANNING,
+        WIFI_STA_CONNECTING,
+        WIFI_STA_CONNECTED,
+        WIFI_STA_FAILED,
+        WIFI_STA_TIMEOUT,
+    };
+
+    struct WifiApInfo_t {
+        std::string ssid;
+        int8_t rssi    = 0;
+        bool encrypted = false;
+    };
+
+    struct WifiStaInfo_t {
+        WifiStaState_t state = WIFI_STA_IDLE;
+        std::string ssid;
+        std::string ip;
+        std::string gateway;
+        std::string mac;
+        int8_t rssi       = 0;
+        int failReason    = 0;
+        bool servicesUp   = false;
+        uint16_t httpPort = 80;
+        uint16_t tcpPort  = 8888;
+        uint16_t udpPort  = 8889;
+        int tcpClients    = 0;
+    };
+
+    struct WifiNetData_t {
+        std::mutex mutex;
+        std::queue<std::string> rxQueue;  // 屏幕数据监视日志，形如 "[TCP] hello" / "[TX-TCP] hi"
+    };
+    WifiNetData_t wifiNetData;
+
+    // 以下接口均为非阻塞（只入队或在锁内读快照），可在 LVGL 回调中安全调用
+    virtual void wifiSetMode(WifiMode_t mode)
+    {
+    }
+    virtual bool wifiHasSavedCredential()
+    {
+        return false;
+    }
+    virtual void wifiConnectSaved()
+    {
+    }
+    virtual void wifiScanStart()
+    {
+    }
+    virtual bool wifiIsScanning()
+    {
+        return false;
+    }
+    virtual std::vector<WifiApInfo_t> wifiGetScanResults()
+    {
+        return {};
+    }
+    virtual void wifiConnect(const std::string& ssid, const std::string& pass)
+    {
+    }
+    virtual void wifiDisconnect()
+    {
+    }
+    virtual WifiStaInfo_t wifiGetStaInfo()
+    {
+        return {};
+    }
+    virtual WifiMode_t wifiGetMode()
+    {
+        return WIFI_MODE_OFF;
+    }
+    virtual void wifiSendData(const std::string& data, bool useUdp)
+    {
+    }
+    virtual void wifiClearRxLog()
+    {
+    }
+
     /* --------------------------------- SD Card -------------------------------- */
     struct FileEntry_t {
         std::string name;
