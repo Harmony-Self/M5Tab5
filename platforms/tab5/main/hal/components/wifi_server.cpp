@@ -138,6 +138,8 @@ button.ghost{background:#12161d;border:1px solid var(--line);color:var(--tx2)}
 #log div{padding:3px 0;word-break:break-all;border-bottom:1px solid rgba(255,255,255,.04)}
 .src{display:inline-block;min-width:52px;font-weight:700;margin-right:8px}
 .s-WEB{color:#38BDF8}.s-TCP{color:#22C55E}.s-UDP{color:#F59E0B}.s-TX{color:#A78BFA}
+.s-TX-TCP{color:#A78BFA}.s-TX-UDP{color:#C084FC}
+.s-RX-TCP{color:#22C55E}.s-RX-UDP{color:#F59E0B}
 .empty{color:var(--tx3);text-align:center;padding:26px 0}
 </style>
 </head>
@@ -215,13 +217,19 @@ async function poll(){
     (j.items||[]).forEach(it=>add(it.src,it.msg));
   }catch(e){}
 }
+let sending=false;  // 防连点：双击/触屏重复触发会造成一次点击发两条
 async function send(){
+  if(sending)return;
   const el=document.getElementById('msg');const t=el.value.trim();
   if(!t)return;
-  const target=udp?'udp':'tcp';
-  await fetch('/send?proto='+target,{method:'POST',body:t});
-  add('TX',t);
-  el.value='';
+  sending=true;
+  try{
+    const target=udp?'udp':'tcp';
+    await fetch('/send?proto='+target,{method:'POST',body:t});
+    el.value='';  // 不再本地 add：设备会把发送也记进历史，由 poll 统一渲染，避免重复
+  }finally{
+    setTimeout(()=>{sending=false;},400);
+  }
 }
 async function clearLog(){await fetch('/clear');cursor=0;first=true;document.getElementById('log').innerHTML='<div class="empty">No data yet</div>';}
 setInterval(poll,1000);poll();
@@ -445,15 +453,33 @@ bool WifiServer::_start_tcp()
         return false;
     }
 
-    _tcp_exited.store(false);
+    if (_tcp_gate == nullptr) {
+        _tcp_gate = xSemaphoreCreateBinary();
+        if (_tcp_gate == nullptr) {
+            ESP_LOGE(TAG, "create tcp gate failed");
+            close(_tcp_listen);
+            _tcp_listen = -1;
+            return false;
+        }
+    }
+
     _tcp_run.store(true);
-    if (xTaskCreate(_tcp_task_trampoline, "wifi_tcp", kTcpTaskStack, this, 5, &_tcp_task) != pdPASS) {
-        ESP_LOGE(TAG, "create tcp task failed");
-        _tcp_run.store(false);
-        _tcp_exited.store(true);
-        close(_tcp_listen);
-        _tcp_listen = -1;
-        return false;
+    _tcp_exited.store(false);
+
+    if (_tcp_task == nullptr) {
+        // 首次启动：创建常驻任务（永不删除，原因见头文件说明）
+        if (xTaskCreate(_tcp_task_trampoline, "wifi_tcp", kTcpTaskStack, this, 5, &_tcp_task) != pdPASS) {
+            ESP_LOGE(TAG, "create tcp task failed");
+            _tcp_task = nullptr;
+            _tcp_run.store(false);
+            _tcp_exited.store(true);
+            close(_tcp_listen);
+            _tcp_listen = -1;
+            return false;
+        }
+    } else {
+        // 任务已存在（处于停止态），唤醒它继续工作
+        xSemaphoreGive(_tcp_gate);
     }
 
     ESP_LOGI(TAG, "tcp server started on port %u", static_cast<unsigned>(kTcpPort));
@@ -472,8 +498,23 @@ void WifiServer::_stop_tcp()
     for (int i = 0; i < 30 && !_tcp_exited.load(); i++) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    _tcp_task = nullptr;
 
+    // 任务常驻、不删除：它回到循环顶部时已经关过 socket，这里再关一次是幂等的
+    _tcp_close_all();
+    WifiService::instance().setTcpClientCount(0);
+    ESP_LOGI(TAG, "tcp server stopped");
+}
+
+void WifiServer::_tcp_task_trampoline(void* arg)
+{
+    static_cast<WifiServer*>(arg)->_tcp_loop();
+    // 常驻任务不应返回；即使异常返回也绝不能 vTaskDelete（会触发 TLS 删除回调检查并 abort）
+    ESP_LOGE(TAG, "tcp task returned unexpectedly");
+    vTaskDelay(portMAX_DELAY);
+}
+
+void WifiServer::_tcp_close_all()
+{
     {
         std::lock_guard<std::mutex> lock(_client_mutex);
         for (int fd : _tcp_clients) {
@@ -486,21 +527,20 @@ void WifiServer::_stop_tcp()
         close(_tcp_listen);
         _tcp_listen = -1;
     }
-
-    WifiService::instance().setTcpClientCount(0);
-    ESP_LOGI(TAG, "tcp server stopped");
-}
-
-void WifiServer::_tcp_task_trampoline(void* arg)
-{
-    static_cast<WifiServer*>(arg)->_tcp_loop();
-    static_cast<WifiServer*>(arg)->_tcp_exited.store(true);
-    vTaskDelete(nullptr);
 }
 
 void WifiServer::_tcp_loop()
 {
-    while (_tcp_run.load()) {
+    while (true) {
+        if (!_tcp_run.load()) {
+            // 停止态：关闭监听与客户端，然后阻塞在 gate 上等待下次启动（任务不退出、不删除）
+            _tcp_close_all();
+            WifiService::instance().setTcpClientCount(0);
+            _tcp_exited.store(true);
+            xSemaphoreTake(_tcp_gate, portMAX_DELAY);
+            continue;
+        }
+
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(_tcp_listen, &readfds);
@@ -553,7 +593,7 @@ void WifiServer::_tcp_loop()
             int len = recv(fd, buf, sizeof(buf) - 1, 0);
             if (len > 0) {
                 buf[len] = '\0';
-                recordInbound("TCP", std::string(buf));
+                recordInbound("RX-TCP", std::string(buf));
             } else if (len == 0) {
                 ESP_LOGI(TAG, "tcp client disconnected");
                 _tcp_remove_client(fd);
@@ -653,15 +693,33 @@ bool WifiServer::_start_udp()
         return false;
     }
 
-    _udp_exited.store(false);
+    if (_udp_gate == nullptr) {
+        _udp_gate = xSemaphoreCreateBinary();
+        if (_udp_gate == nullptr) {
+            ESP_LOGE(TAG, "create udp gate failed");
+            close(_udp_sock);
+            _udp_sock = -1;
+            return false;
+        }
+    }
+
     _udp_run.store(true);
-    if (xTaskCreate(_udp_task_trampoline, "wifi_udp", kUdpTaskStack, this, 5, &_udp_task) != pdPASS) {
-        ESP_LOGE(TAG, "create udp task failed");
-        _udp_run.store(false);
-        _udp_exited.store(true);
-        close(_udp_sock);
-        _udp_sock = -1;
-        return false;
+    _udp_exited.store(false);
+
+    if (_udp_task == nullptr) {
+        // 首次启动：创建常驻任务（永不删除，原因见头文件说明）
+        if (xTaskCreate(_udp_task_trampoline, "wifi_udp", kUdpTaskStack, this, 5, &_udp_task) != pdPASS) {
+            ESP_LOGE(TAG, "create udp task failed");
+            _udp_task = nullptr;
+            _udp_run.store(false);
+            _udp_exited.store(true);
+            close(_udp_sock);
+            _udp_sock = -1;
+            return false;
+        }
+    } else {
+        // 任务已存在（处于停止态），唤醒它继续工作
+        xSemaphoreGive(_udp_gate);
     }
 
     ESP_LOGI(TAG, "udp server started on port %u", static_cast<unsigned>(kUdpPort));
@@ -680,12 +738,9 @@ void WifiServer::_stop_udp()
     for (int i = 0; i < 30 && !_udp_exited.load(); i++) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    _udp_task = nullptr;
 
-    if (_udp_sock >= 0) {
-        close(_udp_sock);
-        _udp_sock = -1;
-    }
+    // 任务常驻、不删除：它回到循环顶部时已经关过 socket，这里再关一次是幂等的
+    _udp_close_all();
 
     {
         std::lock_guard<std::mutex> lock(_udp_mutex);
@@ -695,16 +750,33 @@ void WifiServer::_stop_udp()
     ESP_LOGI(TAG, "udp server stopped");
 }
 
+void WifiServer::_udp_close_all()
+{
+    if (_udp_sock >= 0) {
+        close(_udp_sock);
+        _udp_sock = -1;
+    }
+}
+
 void WifiServer::_udp_task_trampoline(void* arg)
 {
     static_cast<WifiServer*>(arg)->_udp_loop();
-    static_cast<WifiServer*>(arg)->_udp_exited.store(true);
-    vTaskDelete(nullptr);
+    // 常驻任务不应返回；即使异常返回也绝不能 vTaskDelete（会触发 TLS 删除回调检查并 abort）
+    ESP_LOGE(TAG, "udp task returned unexpectedly");
+    vTaskDelay(portMAX_DELAY);
 }
 
 void WifiServer::_udp_loop()
 {
-    while (_udp_run.load()) {
+    while (true) {
+        if (!_udp_run.load()) {
+            // 停止态：关闭 socket 后阻塞在 gate 上等待下次启动（任务不退出、不删除）
+            _udp_close_all();
+            _udp_exited.store(true);
+            xSemaphoreTake(_udp_gate, portMAX_DELAY);
+            continue;
+        }
+
         struct sockaddr_in from = {};
         socklen_t len           = sizeof(from);
         char buf[513];
@@ -729,7 +801,7 @@ void WifiServer::_udp_loop()
         }
 
         buf[ret] = '\0';
-        recordInbound("UDP", std::string(buf));
+        recordInbound("RX-UDP", std::string(buf));
     }
 }
 
@@ -768,6 +840,8 @@ void WifiServer::sendAll(const std::string& data, bool useUdp)
         }
         if (peer.empty() || _udp_sock < 0) {
             ESP_LOGW(TAG, "udp send skipped: no peer yet");
+            // 上屏提示，否则用户只会觉得“点了发送没反应”
+            WifiService::instance().pushRxLog("SYS", "UDP send skipped: no peer yet");
             return;
         }
 
@@ -811,6 +885,16 @@ void WifiServer::sendAll(const std::string& data, bool useUdp)
 
 void WifiServer::recordInbound(const std::string& origin, const std::string& data)
 {
+    _record(origin, data);
+}
+
+void WifiServer::recordOutbound(const std::string& origin, const std::string& data)
+{
+    _record(origin, data);
+}
+
+void WifiServer::_record(const std::string& origin, const std::string& data)
+{
     {
         std::lock_guard<std::mutex> lock(_history_mutex);
         if (static_cast<int>(_history.size()) >= kMaxHistoryItems) {
@@ -840,7 +924,8 @@ std::string WifiServer::history_json(uint32_t since, uint32_t& next_index)
     std::string out;
     bool first = true;
     for (const auto& item : _history) {
-        if (item.index <= since) {
+        // 游标语义：since 是客户端还没拿到的第一个序号，因此只跳过更小的
+        if (item.index < since) {
             continue;
         }
         if (!first) {

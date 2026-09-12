@@ -621,11 +621,13 @@ void WifiService::_handle_command(const Command_t& cmd)
                 break;
             }
             WifiServer::instance().sendAll(cmd.text, cmd.flag);
-            _push_log(cmd.flag ? "TX-UDP" : "TX-TCP", cmd.text);
+            // 收发都记一份：网页历史 + 屏幕监视队列，两侧显示才一致
+            WifiServer::instance().recordOutbound(cmd.flag ? "TX-UDP" : "TX-TCP", cmd.text);
             break;
         }
 
         case Cmd_t::ClearLog: {
+            ESP_LOGI(TAG, "clear rx log requested (service side)");
             // 先在小作用域内清空屏幕日志队列并立刻释放锁，
             // 再清历史记录，避免 wifiNetData.mutex 与 _history_mutex 嵌套加锁
             {

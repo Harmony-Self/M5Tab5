@@ -35,6 +35,13 @@ private:
     /* ------------------------------- UI 构建 -------------------------------- */
     void _build_ui(lv_obj_t* parent);
     void _build_password_modal(lv_obj_t* parent);
+
+    /** @brief 发送输入框用的软键盘：屏幕的直接子对象，只能用 lv_obj_align 定位 */
+    void _build_send_keyboard(lv_obj_t* screen);
+
+    /** @brief 显隐发送键盘；弹出时上移内容层，保证输入框不被键盘遮挡 */
+    void _show_send_keyboard(bool show);
+
     lv_obj_t* _create_card(lv_obj_t* parent, int32_t x, int32_t y, int32_t w, int32_t h, const char* title,
                            lv_obj_t** title_out);
 
@@ -51,6 +58,7 @@ private:
     void _open_password_modal(const std::string& ssid);
     void _close_password_modal();
     void _submit_password();
+    void _submit_send();
 
     static void _on_scan_clicked(lv_event_t* e);
     static void _on_row_clicked(lv_event_t* e);
@@ -61,6 +69,9 @@ private:
     static void _on_modal_connect(lv_event_t* e);
     static void _on_modal_cancel(lv_event_t* e);
     static void _on_keyboard(lv_event_t* e);
+    static void _on_send_focused(lv_event_t* e);
+    static void _on_send_keyboard(lv_event_t* e);
+    static void _on_page_clicked(lv_event_t* e);
 
     lv_obj_t* _root = nullptr;
 
@@ -100,6 +111,13 @@ private:
     lv_obj_t* _chan_udp     = nullptr;
     lv_obj_t* _chan_tcp_txt = nullptr;
     lv_obj_t* _chan_udp_txt = nullptr;
+
+    /* 内容层与发送键盘 */
+    lv_obj_t* _page         = nullptr;
+    lv_obj_t* _send_kb      = nullptr;
+    int32_t   _send_kb_h    = 0;
+    int32_t   _page_shift   = 0;
+    bool      _send_kb_open = false;
 
     /* 密码弹窗 */
     lv_obj_t* _modal             = nullptr;

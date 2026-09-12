@@ -74,6 +74,9 @@ public:
     /** @brief 记录一条“外部 -> 设备”的数据（供网页轮询），同时推送到屏幕监视队列 */
     void recordInbound(const std::string& origin, const std::string& data);
 
+    /** @brief 记录一条“设备 -> 外部”的数据（供网页轮询），同时推送到屏幕监视队列 */
+    void recordOutbound(const std::string& origin, const std::string& data);
+
     /** @brief 清空历史记录 */
     void clearHistory();
 
@@ -111,9 +114,28 @@ private:
     void _tcp_remove_client(int fd);
     void _tcp_broadcast(const std::string& data);
 
+    /** @brief 幂等关闭 TCP 监听与全部客户端（fd 置 -1，可重复调用） */
+    void _tcp_close_all();
+
+    /** @brief 幂等关闭 UDP socket（fd 置 -1，可重复调用） */
+    void _udp_close_all();
+
+    /** @brief 记入网页历史 + 推送到屏幕监视队列（收发共用，保证两侧各记一条） */
+    void _record(const std::string& origin, const std::string& data);
+
     httpd_handle_t _httpd  = nullptr;
     TaskHandle_t _tcp_task = nullptr;
     TaskHandle_t _udp_task = nullptr;
+
+    /* 数据通道任务常驻（与 HTTP 服务同理）：停止时只关闭 socket 并阻塞在 gate 上，
+       启动时 give 唤醒；**永远不调用 vTaskDelete()**。
+       原因：这些任务用过 std::mutex（即 pthread），删除时会走 FreeRTOS 的
+       TLS 删除回调检查并 abort（实测 TLSP deletion callback ... non-excutable
+       pointer）；而且该检查会 ESP_LOGE 打印，自删时回收发生在空闲任务里，
+       空闲任务只有 1536B 栈，printf 直接栈溢出导致整机重启。 */
+    SemaphoreHandle_t _tcp_gate = nullptr;
+    SemaphoreHandle_t _udp_gate = nullptr;
+
     std::atomic<bool> _tcp_run{false};
     std::atomic<bool> _udp_run{false};
     std::atomic<bool> _tcp_exited{true};

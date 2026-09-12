@@ -217,8 +217,27 @@ lv_obj_t* WifiStationView::_create_card(lv_obj_t* parent, int32_t x, int32_t y, 
 
 void WifiStationView::_build_ui(lv_obj_t* parent)
 {
-    lv_obj_set_style_bg_color(parent, lv_color_hex(COL_BG), 0);
-    lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
+    // 屏幕只负责背景，所有内容都挂到内容层 _page 上，
+    // 这样软键盘弹出时可以整体平移 _page，保证输入框不被键盘盖住。
+    // 注意：_page 只能用 lv_obj_set_pos / lv_obj_set_y 控制位置，绝不能给它设 align
+    // （LVGL 中 align 优先于 x/y，设了 align 之后平移就失效）。
+    lv_obj_t* scr = parent;
+    lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    _page = lv_obj_create(scr);
+    lv_obj_set_size(_page, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(_page, 0, 0);
+    lv_obj_remove_flag(_page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(_page, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_set_style_bg_opa(_page, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(_page, 0, 0);
+    lv_obj_set_style_radius(_page, 0, 0);
+    lv_obj_set_style_pad_all(_page, 0, 0);
+    lv_obj_set_style_shadow_width(_page, 0, 0);
+    lv_obj_add_event_cb(_page, _on_page_clicked, LV_EVENT_CLICKED, this);  // 点空白处收起键盘
+
+    parent = _page;  // 之后所有卡片都挂到内容层
 
     /* -------------------------- 顶部状态栏 -------------------------- */
     lv_obj_t* accent = lv_obj_create(parent);
@@ -359,6 +378,9 @@ void WifiStationView::_build_ui(lv_obj_t* parent)
     lv_obj_add_event_cb(send_btn, _on_send_clicked, LV_EVENT_CLICKED, this);
 
     _update_send_channel();
+
+    // 软键盘挂在屏幕上（不是内容层），这样页面平移时它固定贴底
+    _build_send_keyboard(scr);
 }
 
 void WifiStationView::_build_password_modal(lv_obj_t* parent)
@@ -443,6 +465,67 @@ void WifiStationView::_build_password_modal(lv_obj_t* parent)
     lv_obj_add_flag(_modal, LV_OBJ_FLAG_HIDDEN);
 
     mclog::tagInfo(_tag, "password modal layout: screen {}x{} kb_h={} card={}x{}", sw, sh, kb_h, card_w, card_h);
+}
+
+/* ----------------------------- 发送用软键盘 ----------------------------- */
+
+void WifiStationView::_build_send_keyboard(lv_obj_t* screen)
+{
+    lv_display_t* disp = lv_display_get_default();
+    const int32_t sh   = lv_display_get_vertical_resolution(disp);
+    _send_kb_h = (sh * 40) / 100;
+
+    /* 与密码弹窗里的键盘同理：lv_keyboard 构造函数内部会执行
+       lv_obj_align(obj, LV_ALIGN_BOTTOM_MID, 0, 0)，一旦对象带 align，
+       lv_obj_set_pos() 就会被忽略，所以这里只能用 lv_obj_align 定位。 */
+    _send_kb = lv_keyboard_create(screen);
+    lv_obj_set_width(_send_kb, LV_PCT(100));
+    lv_obj_set_height(_send_kb, _send_kb_h);
+    lv_obj_align(_send_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_text_font(_send_kb, &lv_font_montserrat_20, LV_PART_ITEMS);
+    lv_keyboard_set_mode(_send_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_keyboard_set_textarea(_send_kb, _send_ta);
+    lv_obj_add_event_cb(_send_kb, _on_send_keyboard, LV_EVENT_READY, this);
+    lv_obj_add_event_cb(_send_kb, _on_send_keyboard, LV_EVENT_CANCEL, this);
+
+    lv_obj_add_event_cb(_send_ta, _on_send_focused, LV_EVENT_FOCUSED, this);
+    lv_obj_add_event_cb(_send_ta, _on_send_focused, LV_EVENT_DEFOCUSED, this);
+
+    lv_obj_add_flag(_send_kb, LV_OBJ_FLAG_HIDDEN);
+    mclog::tagInfo(_tag, "send keyboard built: kb_h={}", _send_kb_h);
+}
+
+void WifiStationView::_show_send_keyboard(bool show)
+{
+    if (_send_kb == nullptr || _page == nullptr || show == _send_kb_open) {
+        return;
+    }
+    _send_kb_open = show;
+
+    if (show) {
+        lv_obj_remove_flag(_send_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_update_layout(_page);
+
+        lv_area_t ta{};
+        lv_area_t kb{};
+        lv_obj_get_coords(_send_ta, &ta);
+        lv_obj_get_coords(_send_kb, &kb);
+
+        // 把内容层整体上移，使输入框底边露在键盘顶边之上（屏幕上移越多越靠上）
+        int32_t shift = (ta.y2 + 12) - kb.y1;
+        if (shift < 0) {
+            shift = 0;
+        }
+        if (shift > kb.y1) {
+            shift = kb.y1;  // 极端小屏时最多让出整个键盘高度
+        }
+        _page_shift = shift;
+        lv_obj_set_y(_page, -shift);
+    } else {
+        _page_shift = 0;
+        lv_obj_set_y(_page, 0);
+        lv_obj_add_flag(_send_kb, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /* --------------------------------- 激活 ---------------------------------- */
@@ -808,6 +891,12 @@ void WifiStationView::_open_password_modal(const std::string& ssid)
     lv_obj_move_foreground(_modal);
     lv_keyboard_set_textarea(_modal_kb, _modal_pass);
 
+    // 密码弹窗打开时收起发送键盘，避免两个键盘同时抢输入
+    if (_send_kb != nullptr) {
+        lv_keyboard_set_textarea(_send_kb, nullptr);
+    }
+    _show_send_keyboard(false);
+
     // 首次打开时打印真实几何，便于在真机上核对：键盘应紧贴输入框下方且完整落在屏内
     if (!_geom_logged) {
         _geom_logged = true;
@@ -833,6 +922,9 @@ void WifiStationView::_close_password_modal()
 {
     lv_keyboard_set_textarea(_modal_kb, nullptr);
     lv_obj_add_flag(_modal, LV_OBJ_FLAG_HIDDEN);
+    if (_send_kb != nullptr) {
+        lv_keyboard_set_textarea(_send_kb, _send_ta);
+    }
     _modal_open       = false;
     _modal_connecting = false;
 }
@@ -853,6 +945,17 @@ void WifiStationView::_submit_password()
     _set_text(_modal_err, "");
     _set_text(_modal_connect_txt, "Connecting...");
     lv_obj_add_state(_modal_connect, LV_STATE_DISABLED);
+}
+
+void WifiStationView::_submit_send()
+{
+    const char* text = lv_textarea_get_text(_send_ta);
+    if (text == nullptr || text[0] == '\0') {
+        return;
+    }
+
+    GetHAL()->wifiSendData(std::string(text), _use_udp);
+    lv_textarea_set_text(_send_ta, "");
 }
 
 void WifiStationView::_on_row_clicked(lv_event_t* e)
@@ -889,13 +992,8 @@ void WifiStationView::_on_send_clicked(lv_event_t* e)
         return;
     }
 
-    const char* text = lv_textarea_get_text(self->_send_ta);
-    if (text == nullptr || text[0] == '\0') {
-        return;
-    }
-
-    GetHAL()->wifiSendData(std::string(text), self->_use_udp);
-    lv_textarea_set_text(self->_send_ta, "");
+    self->_submit_send();
+    self->_show_send_keyboard(false);
 }
 
 void WifiStationView::_on_clear_clicked(lv_event_t* e)
@@ -905,10 +1003,27 @@ void WifiStationView::_on_clear_clicked(lv_event_t* e)
         return;
     }
 
-    GetHAL()->wifiClearRxLog();
+    // 同步清空：直接把待拉取的队列在这里清掉，不等服务任务异步处理，
+    // 否则 30ms 的刷新周期可能先把旧数据回填，界面看上去"没反应"。
+    size_t queue_before = 0;
+    {
+        std::lock_guard<std::mutex> lock(GetHAL()->wifiNetData.mutex);
+        auto& q = GetHAL()->wifiNetData.rxQueue;
+        queue_before = q.size();
+        while (!q.empty()) {
+            q.pop();
+        }
+    }
+
+    const size_t buf_before = self->_log_buf.size();
     self->_log_buf.clear();
     lv_textarea_set_text(self->_log_ta, "");
     lv_obj_remove_flag(self->_log_hint, LV_OBJ_FLAG_HIDDEN);
+
+    // 仍然通知服务端清空网页侧历史记录（异步）
+    GetHAL()->wifiClearRxLog();
+
+    mclog::tagInfo(_tag, "clear clicked: buf_before={} queue_before={}", buf_before, queue_before);
 }
 
 void WifiStationView::_on_chan_tcp_clicked(lv_event_t* e)
@@ -963,4 +1078,37 @@ void WifiStationView::_on_keyboard(lv_event_t* e)
     } else {
         self->_close_password_modal();
     }
+}
+
+void WifiStationView::_on_send_focused(lv_event_t* e)
+{
+    auto* self = static_cast<WifiStationView*>(lv_event_get_user_data(e));
+    if (self == nullptr) {
+        return;
+    }
+    self->_show_send_keyboard(lv_event_get_code(e) == LV_EVENT_FOCUSED);
+}
+
+void WifiStationView::_on_send_keyboard(lv_event_t* e)
+{
+    auto* self = static_cast<WifiStationView*>(lv_event_get_user_data(e));
+    if (self == nullptr) {
+        return;
+    }
+
+    // 键盘的确认键直接发送，关闭键只收起
+    if (lv_event_get_code(e) == LV_EVENT_READY) {
+        self->_submit_send();
+    }
+    self->_show_send_keyboard(false);
+}
+
+void WifiStationView::_on_page_clicked(lv_event_t* e)
+{
+    auto* self = static_cast<WifiStationView*>(lv_event_get_user_data(e));
+    if (self == nullptr) {
+        return;
+    }
+    // 点击内容层空白处收起发送键盘
+    self->_show_send_keyboard(false);
 }
