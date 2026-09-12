@@ -116,7 +116,6 @@ private:
     lv_obj_t* _page         = nullptr;
     lv_obj_t* _send_kb      = nullptr;
     int32_t   _send_kb_h    = 0;
-    int32_t   _page_shift   = 0;
     bool      _send_kb_open = false;
 
     /* 密码弹窗 */

@@ -338,7 +338,9 @@ void WifiStationView::_build_ui(lv_obj_t* parent)
     lv_textarea_set_one_line(_log_ta, false);
     lv_textarea_set_cursor_click_pos(_log_ta, false);
     lv_textarea_set_password_mode(_log_ta, false);
-    lv_obj_remove_flag(_log_ta, LV_OBJ_FLAG_CLICKABLE);
+    // 注意：CLICKABLE 必须保留 —— lv_obj_hit_test() 对不带该标志的对象直接返回 false，
+    // 会导致触摸命中不到它、拖动事件落到不可滚动的父卡片上，监视窗就划不动了。
+    // 只去掉 CLICK_FOCUSABLE：既能拖动滚动，又不会在点击时抢走发送框的焦点。
     lv_obj_remove_flag(_log_ta, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_style_border_width(_log_ta, 0, 0);
     lv_obj_set_style_bg_color(_log_ta, lv_color_hex(0x0D1117), 0);
@@ -519,10 +521,8 @@ void WifiStationView::_show_send_keyboard(bool show)
         if (shift > kb.y1) {
             shift = kb.y1;  // 极端小屏时最多让出整个键盘高度
         }
-        _page_shift = shift;
         lv_obj_set_y(_page, -shift);
     } else {
-        _page_shift = 0;
         lv_obj_set_y(_page, 0);
         lv_obj_add_flag(_send_kb, LV_OBJ_FLAG_HIDDEN);
     }

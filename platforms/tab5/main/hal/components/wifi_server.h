@@ -68,14 +68,18 @@ public:
     /** @brief 当前是否为 AP 模式（决定首页内容），可被 httpd 线程安全读取 */
     bool ap_mode() const;
 
-    /** @brief 向所有已连接 TCP 客户端（useUdp=false）或最近一次 UDP 对端发送数据 */
-    void sendAll(const std::string& data, bool useUdp);
+    /** @brief 向所有已连接 TCP 客户端（useUdp=false）或最近一次 UDP 对端发送数据
+     *  @return 是否真正发出（UDP 无对端 / TCP 无客户端时为 false，便于上层决定是否记账） */
+    bool sendAll(const std::string& data, bool useUdp);
 
     /** @brief 记录一条“外部 -> 设备”的数据（供网页轮询），同时推送到屏幕监视队列 */
     void recordInbound(const std::string& origin, const std::string& data);
 
     /** @brief 记录一条“设备 -> 外部”的数据（供网页轮询），同时推送到屏幕监视队列 */
     void recordOutbound(const std::string& origin, const std::string& data);
+
+    /** @brief 若当前还没有 UDP 对端，就用给定地址补上（网页端首次发送时自动学习） */
+    void setUdpPeerIfUnknown(const std::string& ip, uint16_t port);
 
     /** @brief 清空历史记录 */
     void clearHistory();

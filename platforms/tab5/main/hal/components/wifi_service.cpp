@@ -620,8 +620,10 @@ void WifiService::_handle_command(const Command_t& cmd)
                 _push_log("SYS", "Services not running, send dropped");
                 break;
             }
+            // 网页本身就是数据端点：界面/网页发出的内容一律记账，只记这一行。
+            // 没有外部接收方时不再往监视窗追加提示行（避免每次发送多出一行噪音），
+            // 该情况仍会打串口日志，网页状态区也会显示 TCP clients / UDP peer。
             WifiServer::instance().sendAll(cmd.text, cmd.flag);
-            // 收发都记一份：网页历史 + 屏幕监视队列，两侧显示才一致
             WifiServer::instance().recordOutbound(cmd.flag ? "TX-UDP" : "TX-TCP", cmd.text);
             break;
         }

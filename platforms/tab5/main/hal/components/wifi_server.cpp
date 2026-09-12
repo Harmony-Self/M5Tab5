@@ -323,6 +323,23 @@ esp_err_t send_post_handler(httpd_req_t* req)
     }
 
     ESP_LOGI(TAG, "web send via %s, %d bytes", use_udp ? "udp" : "tcp", received);
+
+    // 还没有 UDP 对端时，用网页客户端的 IP（端口 kUdpPort）补上：
+    // 否则设备只在收到过 UDP 包后才认识对端，单纯从网页点发送永远发不出去
+    int sockfd = httpd_req_to_sockfd(req);
+    struct sockaddr_storage from = {};
+    socklen_t fromlen            = sizeof(from);
+    if (sockfd >= 0 && getpeername(sockfd, reinterpret_cast<struct sockaddr*>(&from), &fromlen) == 0) {
+        char ip[64] = {};
+        if (from.ss_family == AF_INET) {
+            auto* sin = reinterpret_cast<struct sockaddr_in*>(&from);
+            inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
+        }
+        if (ip[0] != '\0') {
+            WifiServer::instance().setUdpPeerIfUnknown(ip, WifiServer::kUdpPort);
+        }
+    }
+
     WifiService::instance().sendData(body, use_udp);
 
     httpd_resp_set_type(req, "application/json");
@@ -424,6 +441,12 @@ bool WifiServer::_start_tcp()
 {
     if (_tcp_run.load()) {
         return true;
+    }
+
+    if (_tcp_listen >= 0) {
+        // 兜底：清理可能残留的监听 fd，避免重复启动泄漏
+        close(_tcp_listen);
+        _tcp_listen = -1;
     }
 
     _tcp_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -538,6 +561,12 @@ void WifiServer::_tcp_loop()
             WifiService::instance().setTcpClientCount(0);
             _tcp_exited.store(true);
             xSemaphoreTake(_tcp_gate, portMAX_DELAY);
+            continue;
+        }
+
+        if (_tcp_listen < 0) {
+            // 监听 socket 尚未就绪（停止/启动竞态）：绝不能对 -1 调 FD_SET（未定义行为）
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
@@ -669,6 +698,12 @@ bool WifiServer::_start_udp()
         return true;
     }
 
+    if (_udp_sock >= 0) {
+        // 兜底：清理可能残留的 fd，避免重复启动泄漏
+        close(_udp_sock);
+        _udp_sock = -1;
+    }
+
     _udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (_udp_sock < 0) {
         ESP_LOGE(TAG, "udp socket create failed: errno %d", errno);
@@ -777,6 +812,12 @@ void WifiServer::_udp_loop()
             continue;
         }
 
+        if (_udp_sock < 0) {
+            // socket 未就绪（停止/启动竞态）：不要对 -1 调 recvfrom 刷错误日志
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
         struct sockaddr_in from = {};
         socklen_t len           = sizeof(from);
         char buf[513];
@@ -805,6 +846,24 @@ void WifiServer::_udp_loop()
     }
 }
 
+void WifiServer::setUdpPeerIfUnknown(const std::string& ip, uint16_t port)
+{
+    if (ip.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(_udp_mutex);
+    if (!_udp_peer_addr.empty()) {
+        return;
+    }
+
+    char peer[64];
+    snprintf(peer, sizeof(peer), "%s:%u", ip.c_str(), static_cast<unsigned>(port));
+    _udp_peer_addr = peer;
+    _udp_peer_tick = xTaskGetTickCount();
+    ESP_LOGI(TAG, "udp peer learned from web client: %s", peer);
+}
+
 bool WifiServer::udp_peer_alive()
 {
     std::lock_guard<std::mutex> lock(_udp_mutex);
@@ -822,11 +881,11 @@ std::string WifiServer::udp_peer_addr()
 
 /* --------------------------------- 发送 ----------------------------------- */
 
-void WifiServer::sendAll(const std::string& data, bool useUdp)
+bool WifiServer::sendAll(const std::string& data, bool useUdp)
 {
     std::string payload = data;
     if (payload.empty()) {
-        return;
+        return false;
     }
     if (payload.back() != '\n') {
         payload += '\n';
@@ -840,9 +899,7 @@ void WifiServer::sendAll(const std::string& data, bool useUdp)
         }
         if (peer.empty() || _udp_sock < 0) {
             ESP_LOGW(TAG, "udp send skipped: no peer yet");
-            // 上屏提示，否则用户只会觉得“点了发送没反应”
-            WifiService::instance().pushRxLog("SYS", "UDP send skipped: no peer yet");
-            return;
+            return false;  // 由上层统一提示并决定不记账，避免“没发出却显示已发送”
         }
 
         struct sockaddr_in addr = {};
@@ -853,7 +910,7 @@ void WifiServer::sendAll(const std::string& data, bool useUdp)
         int port       = 0;
         const char* colon = strrchr(peer.c_str(), ':');
         if (colon == nullptr) {
-            return;
+            return false;
         }
         size_t ip_len = static_cast<size_t>(colon - peer.c_str());
         if (ip_len >= sizeof(ip)) {
@@ -868,17 +925,30 @@ void WifiServer::sendAll(const std::string& data, bool useUdp)
 
         if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
             ESP_LOGW(TAG, "udp peer address invalid: %s", peer.c_str());
-            return;
+            return false;
         }
 
         int sent = sendto(_udp_sock, payload.c_str(), payload.size(), 0, reinterpret_cast<struct sockaddr*>(&addr),
                           sizeof(addr));
         if (sent < 0) {
             ESP_LOGW(TAG, "udp send failed: errno %d", errno);
+            return false;
         }
-    } else {
-        _tcp_broadcast(payload);
+        return true;
     }
+
+    bool has_client = false;
+    {
+        std::lock_guard<std::mutex> lock(_client_mutex);
+        has_client = !_tcp_clients.empty();
+    }
+    if (!has_client) {
+        ESP_LOGW(TAG, "tcp send skipped: no client connected");
+        return false;
+    }
+
+    _tcp_broadcast(payload);
+    return true;
 }
 
 /* -------------------------------- 历史记录 -------------------------------- */
