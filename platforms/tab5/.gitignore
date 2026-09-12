@@ -8,3 +8,9 @@ managed_components
 # /output
 
 sdkconfig.old
+
+# 技术帖写作稿（不随代码提交）
+docs/
+
+# IDE 会话数据（不随代码提交）
+.codebuddy/
